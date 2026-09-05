@@ -1013,11 +1013,16 @@ fn choose_filter(
             Print(" ")
         )?;
         if active {
-            queue!(stdout, SetAttribute(Attribute::Bold))?;
+            queue!(
+                stdout,
+                SetAttribute(Attribute::Bold),
+                SetForegroundColor(Color::Yellow)
+            )?;
+        } else {
+            queue!(stdout, SetForegroundColor(Color::Cyan))?;
         }
         queue!(
             stdout,
-            SetForegroundColor(Color::Cyan),
             Print(shortcut),
             ResetColor,
             Print(" "),
