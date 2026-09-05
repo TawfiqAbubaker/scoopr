@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
+    env, fs,
     io::{self, Read, Write},
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -30,6 +31,9 @@ const KIND_PATH: u8 = 1 << 2;
 const KIND_URL: u8 = 1 << 3;
 const KIND_HASH: u8 = 1 << 4;
 const KIND_QUOTE: u8 = 1 << 5;
+const DEFAULT_KEYBINDING: &str = "prefix+shift+c";
+const SETUP_START: &str = "# >>> scoopr keybinding >>>";
+const SETUP_END: &str = "# <<< scoopr keybinding <<<";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Candidate {
@@ -131,8 +135,10 @@ fn main() {
         Some("open") => open_picker(),
         Some("picker") => run_picker(),
         Some("extract") => extract_stdin(),
+        Some("setup") => setup_config(),
+        Some("remove-setup") => remove_setup(),
         _ => {
-            eprintln!("usage: scoopr <open|picker|extract>");
+            eprintln!("usage: scoopr <open|picker|extract|setup|remove-setup>");
             Err("unknown command".into())
         }
     };
@@ -141,6 +147,152 @@ fn main() {
         eprintln!("scoopr: {error}");
         std::process::exit(1);
     }
+}
+
+fn setup_config() -> Result<(), Box<dyn std::error::Error>> {
+    let path = herdr_config_path()?;
+    let original = read_config(&path)?;
+
+    if original.contains(SETUP_START) || active_command(&original, "scoopr.open") {
+        println!("Scoopr is already configured in {}", path.display());
+        return Ok(());
+    }
+
+    if active_keybinding(&original, DEFAULT_KEYBINDING) {
+        return Err(format!(
+            "cannot add Scoopr's {DEFAULT_KEYBINDING} binding: that key is already configured in {}",
+            path.display()
+        )
+        .into());
+    }
+
+    let mut updated = original.clone();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&format!(
+        "\n{SETUP_START}\n[[keys.command]]\nkey = \"{DEFAULT_KEYBINDING}\"\ntype = \"plugin_action\"\ncommand = \"scoopr.open\"\ndescription = \"Scoop text from current tab\"\n{SETUP_END}\n"
+    ));
+
+    write_config(&path, &original, &updated)?;
+    println!(
+        "Added Scoopr's {DEFAULT_KEYBINDING} binding to {}. Reload Herdr with `herdr server reload-config`.",
+        path.display()
+    );
+    Ok(())
+}
+
+fn remove_setup() -> Result<(), Box<dyn std::error::Error>> {
+    let path = herdr_config_path()?;
+    let original = read_config(&path)?;
+    let Some(updated) = remove_setup_block(&original) else {
+        println!(
+            "Scoopr's managed keybinding is not present in {}",
+            path.display()
+        );
+        return Ok(());
+    };
+
+    write_config(&path, &original, &updated)?;
+    println!(
+        "Removed Scoopr's managed keybinding from {}. Reload Herdr with `herdr server reload-config`.",
+        path.display()
+    );
+    Ok(())
+}
+
+fn herdr_config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = env::var_os("HERDR_CONFIG_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+
+    let home = env::var_os("HOME").ok_or("could not determine the home directory")?;
+    Ok(PathBuf::from(home).join(".config/herdr/config.toml"))
+}
+
+fn read_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    if path.exists() {
+        Ok(fs::read_to_string(path)?)
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn active_keybinding(config: &str, key: &str) -> bool {
+    config.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+        line.strip_prefix("key = ")
+            .and_then(|value| value.strip_prefix('"'))
+            .and_then(|value| value.strip_suffix('"'))
+            == Some(key)
+    })
+}
+
+fn active_command(config: &str, command: &str) -> bool {
+    let expected = format!("command = \"{command}\"");
+    config.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#') && line == expected
+    })
+}
+
+fn remove_setup_block(config: &str) -> Option<String> {
+    let mut removing = false;
+    let mut found = false;
+    let mut kept = Vec::new();
+
+    for line in config.lines() {
+        if line == SETUP_START {
+            removing = true;
+            found = true;
+            continue;
+        }
+        if removing {
+            if line == SETUP_END {
+                removing = false;
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+
+    if !found || removing {
+        return None;
+    }
+
+    let mut result = kept.join("\n");
+    if config.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    Some(result)
+}
+
+fn write_config(
+    path: &Path,
+    original: &str,
+    updated: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        let backup = PathBuf::from(format!("{}.scoopr.bak", path.display()));
+        fs::copy(path, &backup)?;
+        eprintln!("Backed up {} to {}", path.display(), backup.display());
+    }
+
+    let temporary = PathBuf::from(format!("{}.scoopr.tmp", path.display()));
+    fs::write(&temporary, updated)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+
+    debug_assert_ne!(original, updated);
+    Ok(())
 }
 
 fn open_picker() -> Result<(), Box<dyn std::error::Error>> {
@@ -1255,6 +1407,28 @@ mod tests {
                 "w1:p3".to_string(),
                 "w2:p1".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn detects_only_active_matching_keybindings() {
+        assert!(!super::active_keybinding(
+            "# key = \"prefix+shift+c\"\n",
+            super::DEFAULT_KEYBINDING
+        ));
+        assert!(super::active_keybinding(
+            "key = \"prefix+shift+c\"\n",
+            super::DEFAULT_KEYBINDING
+        ));
+    }
+
+    #[test]
+    fn removes_only_scoopr_managed_block() {
+        let config = "[keys]\n\n# >>> scoopr keybinding >>>\n[[keys.command]]\nkey = \"prefix+shift+c\"\ntype = \"plugin_action\"\ncommand = \"scoopr.open\"\ndescription = \"Scoop text from current tab\"\n# <<< scoopr keybinding <<<\n";
+
+        assert_eq!(
+            super::remove_setup_block(config),
+            Some("[keys]\n\n".to_string())
         );
     }
 }

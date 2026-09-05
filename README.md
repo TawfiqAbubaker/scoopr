@@ -55,6 +55,20 @@ You can also invoke the action directly:
 herdr plugin action invoke scoopr.open
 ```
 
+To have Scoopr add its recommended binding automatically, run its setup action:
+
+```sh
+herdr plugin action invoke scoopr.setup
+herdr server reload-config
+```
+
+Setup is idempotent. It creates a `config.toml.scoopr.bak` backup before editing, refuses to overwrite an existing `prefix+shift+c` binding, and marks the block so it can be removed later:
+
+```sh
+herdr plugin action invoke scoopr.remove-setup
+herdr server reload-config
+```
+
 ## Use the picker
 
 Scoopr opens with the scrollback from every pane in the current tab. It keeps the originating pane, so the result is returned to the right place even though the picker runs in a popup.
