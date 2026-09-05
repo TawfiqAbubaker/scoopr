@@ -5,10 +5,29 @@ Scoopr is a small Rust plugin for [Herdr](https://herdr.dev) that turns terminal
 ## Requirements
 
 - Herdr 0.7.0 or newer
-- Rust and Cargo (only needed to build or install from source)
+- Rust and Cargo (Herdr uses Cargo to build the plugin during installation)
 - A terminal that supports OSC 52 clipboard requests for the `Tab` copy action
 
 Scoopr supports macOS and Linux. It does not require tmux.
+
+## Install
+
+Install the published GitHub plugin:
+
+```sh
+herdr plugin install TawfiqAbubaker/scoopr -y
+herdr plugin action invoke scoopr.setup
+herdr server reload-config
+```
+
+The setup action adds the recommended `prefix+shift+c` launch shortcut and creates Scoopr's starter settings file. 
+
+To update to the latest published version:
+
+```sh
+herdr plugin uninstall scoopr
+herdr plugin install TawfiqAbubaker/scoopr -y
+```
 
 ## Install from a checkout
 
@@ -19,8 +38,6 @@ cargo build --release
 herdr plugin link .
 herdr plugin action list --plugin scoopr
 ```
-
-After publishing, replace the checkout step with your repository's clone URL.
 
 The repository's Herdr manifest builds the release binary and runs that binary at runtime, so Cargo is not needed in Herdr's runtime `PATH`.
 

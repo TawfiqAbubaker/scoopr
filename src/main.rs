@@ -213,10 +213,12 @@ enum Scope {
 }
 
 impl Scope {
-    fn next(self) -> Self {
+    fn next(self, skip_tab: bool) -> Self {
         match self {
+            Self::Tab if skip_tab => Self::Server,
             Self::Tab => Self::Space,
             Self::Space => Self::Server,
+            Self::Server if skip_tab => Self::Space,
             Self::Server => Self::Tab,
         }
     }
@@ -602,7 +604,12 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
     let target = target_pane().ok_or("could not determine the originating pane")?;
     let tab = target_tab().ok_or("could not determine the originating tab")?;
     let workspace = target_workspace().ok_or("could not determine the originating space")?;
-    let scope = picker_config.scope;
+    let skip_tab = workspace_tab_count(&workspace)? == 1;
+    let scope = if skip_tab && picker_config.scope == Scope::Tab {
+        Scope::Server
+    } else {
+        picker_config.scope
+    };
     let text = read_scope(scope, &tab, &workspace)?;
     let candidates = extract_candidates(&text);
 
@@ -616,6 +623,7 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
         &tab,
         &workspace,
         scope,
+        skip_tab,
         candidates,
         picker_config,
     );
@@ -631,6 +639,7 @@ fn picker_loop(
     tab: &str,
     workspace: &str,
     mut scope: Scope,
+    skip_tab: bool,
     mut candidates: Vec<Candidate>,
     config: PickerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -727,7 +736,7 @@ fn picker_loop(
                 (code, modifiers) if matches_shortcut(code, modifiers, config.cycle_scope) => {
                     drop(filtered);
                     cached_scopes[scope.index()] = Some(candidates);
-                    scope = scope.next();
+                    scope = scope.next(skip_tab);
                     candidates = match cached_scopes[scope.index()].take() {
                         Some(cached) => cached,
                         None => extract_candidates(&read_scope(scope, tab, workspace)?),
@@ -1156,6 +1165,49 @@ fn read_scope(
     Ok(combined)
 }
 
+fn workspace_tab_count(workspace: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let output = Command::new(herdr)
+        .args(["pane", "list", "--workspace", workspace])
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string()
+            .into());
+    }
+
+    let response: Value = serde_json::from_slice(&output.stdout)?;
+    Ok(tab_ids_in_workspace(&response, workspace).len())
+}
+
+fn tab_ids_in_workspace(value: &Value, workspace: &str) -> HashSet<String> {
+    fn visit(value: &Value, workspace: &str, tab_ids: &mut HashSet<String>) {
+        match value {
+            Value::Object(object) => {
+                if object.get("workspace_id").and_then(Value::as_str) == Some(workspace) {
+                    if let Some(tab_id) = object.get("tab_id").and_then(Value::as_str) {
+                        tab_ids.insert(tab_id.to_string());
+                    }
+                }
+                for nested in object.values() {
+                    visit(nested, workspace, tab_ids);
+                }
+            }
+            Value::Array(values) => {
+                for nested in values {
+                    visit(nested, workspace, tab_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut tab_ids = HashSet::new();
+    visit(value, workspace, &mut tab_ids);
+    tab_ids
+}
+
 fn pane_ids_in_scope(value: &Value, scope: Scope, tab: &str, workspace: &str) -> Vec<String> {
     fn visit(
         value: &Value,
@@ -1551,8 +1603,8 @@ fn find_context_string(value: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_base64, extract_candidates, pane_ids_in_scope, ranked_matches, Candidate, Filter,
-        Scope, KIND_LINE, KIND_WORD,
+        encode_base64, extract_candidates, pane_ids_in_scope, ranked_matches, tab_ids_in_workspace,
+        Candidate, Filter, Scope, KIND_LINE, KIND_WORD,
     };
     use norm::fzf::{FzfParser, FzfV2};
     use serde_json::json;
@@ -1727,9 +1779,12 @@ mod tests {
 
     #[test]
     fn cycles_through_all_scopes() {
-        assert_eq!(Scope::Tab.next(), Scope::Space);
-        assert_eq!(Scope::Space.next(), Scope::Server);
-        assert_eq!(Scope::Server.next(), Scope::Tab);
+        assert_eq!(Scope::Tab.next(false), Scope::Space);
+        assert_eq!(Scope::Space.next(false), Scope::Server);
+        assert_eq!(Scope::Server.next(false), Scope::Tab);
+        assert_eq!(Scope::Tab.next(true), Scope::Server);
+        assert_eq!(Scope::Server.next(true), Scope::Space);
+        assert_eq!(Scope::Space.next(true), Scope::Server);
         assert_eq!(Scope::Tab.index(), 0);
         assert_eq!(Scope::Space.index(), 1);
         assert_eq!(Scope::Server.index(), 2);
@@ -1795,6 +1850,21 @@ mod tests {
                 "w2:p1".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn counts_distinct_tabs_in_a_workspace() {
+        let response = json!({
+            "panes": [
+                { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1" },
+                { "pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1" },
+                { "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1" },
+                { "pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2" }
+            ]
+        });
+
+        assert_eq!(tab_ids_in_workspace(&response, "w1").len(), 2);
+        assert_eq!(tab_ids_in_workspace(&response, "w2").len(), 1);
     }
 
     #[test]
