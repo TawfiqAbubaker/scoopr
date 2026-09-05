@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     io::{self, Read, Write},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -1422,8 +1423,11 @@ fn ranked_matches<'a>(
             let (normalized_candidate, original_character_indices) =
                 normalize_for_match(&candidate.text);
             let mut ranges = Vec::new();
-            let distance =
-                matcher.distance_and_ranges(query, &normalized_candidate, &mut ranges)?;
+            let distance = catch_unwind(AssertUnwindSafe(|| {
+                matcher.distance_and_ranges(query, &normalized_candidate, &mut ranges)
+            }))
+            .ok()
+            .flatten()?;
             let literal_rank = literal_match_rank(&normalized_candidate, &normalized_query);
             let positions = normalized_candidate
                 .char_indices()
@@ -1446,25 +1450,23 @@ fn ranked_matches<'a>(
         })
         .collect::<Vec<_>>();
 
-    // The UI is bottom-up and selects the final row, so put the best fzf
-    // result last. Literal phrases outrank fuzzy-only matches, and stable
-    // source order breaks equal-score ties in favor of newer candidates.
+    // The UI is bottom-up and selects the final row. Keep line candidates in
+    // their own total-order group so newer terminal lines win among lines,
+    // while words and structured candidates retain match-quality ranking.
     ranked.sort_by(|left, right| {
-        if left.5 && right.5 {
-            // Terminal lines are ordered from top to bottom during
-            // extraction, so the later line should win when both lines
-            // match the query. This keeps the picker useful for commands
-            // that have been repeated with newer arguments.
-            left.4
-                .cmp(&right.4)
-                .then_with(|| left.2.cmp(&right.2))
-                .then_with(|| right.3.cmp(&left.3))
-        } else {
-            left.2
-                .cmp(&right.2)
-                .then_with(|| right.3.cmp(&left.3))
-                .then_with(|| left.4.cmp(&right.4))
-        }
+        left.5.cmp(&right.5).then_with(|| {
+            if left.5 {
+                left.4
+                    .cmp(&right.4)
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| right.3.cmp(&left.3))
+            } else {
+                left.2
+                    .cmp(&right.2)
+                    .then_with(|| right.3.cmp(&left.3))
+                    .then_with(|| left.4.cmp(&right.4))
+            }
+        })
     });
     ranked
         .into_iter()
@@ -1651,6 +1653,50 @@ mod tests {
             ranked.last().map(|(candidate, _)| candidate.as_str()),
             Some("git add src/main.rs")
         );
+    }
+
+    #[test]
+    fn handles_a_single_h_search_query() {
+        let candidates = extract_candidates(
+            "https://example.com\ncommit deadbeef\nherdr plugin action invoke scoopr.open",
+        );
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(&candidates, Filter::All, "h", &mut matcher, &mut parser);
+
+        assert!(!ranked.is_empty());
+    }
+
+    #[test]
+    fn handles_single_letter_search_queries() {
+        let candidates = extract_candidates(
+            "alpha bravo charlie delta echo foxtrot golf hotel\n\
+             herdr plugin action invoke scoopr.open\n\
+             https://example.com/path",
+        );
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        for letter in 'a'..='z' {
+            let query = letter.to_string();
+            let _ = ranked_matches(&candidates, Filter::All, &query, &mut matcher, &mut parser);
+        }
+    }
+
+    #[test]
+    fn handles_repeated_queries_and_clearing() {
+        let candidates = extract_candidates(
+            "alpha bravo charlie delta echo foxtrot golf hotel\n\
+             herdr plugin action invoke scoopr.open\n\
+             https://example.com/path",
+        );
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        for query in ["a", "aa", "a", "", "a", "a", "", "a"] {
+            let _ = ranked_matches(&candidates, Filter::All, query, &mut matcher, &mut parser);
+        }
     }
 
     #[test]
