@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Test and coverage output
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Editor-local settings
+/.idea/
+/.vscode/
+/.fleet/
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

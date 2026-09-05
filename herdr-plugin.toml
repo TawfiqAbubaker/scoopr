@@ -1,0 +1,23 @@
+id = "scoopr"
+name = "Scoopr"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Scoop text from a Herdr pane and copy or insert it"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "open"
+title = "Scoop text from pane"
+contexts = ["pane"]
+command = ["./target/release/scoopr", "open"]
+
+[[panes]]
+id = "picker"
+title = "scoopr"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["./target/release/scoopr", "picker"]

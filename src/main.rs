@@ -1,0 +1,1260 @@
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    io::{self, Read, Write},
+    process::Command,
+};
+
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute, queue,
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
+};
+use norm::{
+    fzf::{FzfParser, FzfV2},
+    Metric,
+};
+use serde_json::Value;
+
+const PLUGIN_ID: &str = "scoopr";
+const HORIZONTAL_PAN_STEP: usize = 8;
+const ALL_AVAILABLE_PANE_LINES: &str = "4294967295";
+const KIND_WORD: u8 = 1 << 0;
+const KIND_LINE: u8 = 1 << 1;
+const KIND_PATH: u8 = 1 << 2;
+const KIND_URL: u8 = 1 << 3;
+const KIND_HASH: u8 = 1 << 4;
+const KIND_QUOTE: u8 = 1 << 5;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Candidate {
+    text: String,
+    kinds: u8,
+}
+
+impl Candidate {
+    fn appears_in(&self, filter: Filter) -> bool {
+        filter.kind().map_or(true, |kind| self.kinds & kind != 0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Filter {
+    All,
+    Word,
+    Line,
+    Path,
+    Url,
+    Hash,
+    Quote,
+}
+
+impl Filter {
+    fn from_key(key: char) -> Option<Self> {
+        match key.to_ascii_lowercase() {
+            'a' => Some(Self::All),
+            'w' => Some(Self::Word),
+            'l' => Some(Self::Line),
+            'p' => Some(Self::Path),
+            'u' => Some(Self::Url),
+            'h' => Some(Self::Hash),
+            'q' => Some(Self::Quote),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Word => "word",
+            Self::Line => "line",
+            Self::Path => "path",
+            Self::Url => "url",
+            Self::Hash => "hash",
+            Self::Quote => "quote",
+        }
+    }
+
+    fn kind(self) -> Option<u8> {
+        match self {
+            Self::All => None,
+            Self::Word => Some(KIND_WORD),
+            Self::Line => Some(KIND_LINE),
+            Self::Path => Some(KIND_PATH),
+            Self::Url => Some(KIND_URL),
+            Self::Hash => Some(KIND_HASH),
+            Self::Quote => Some(KIND_QUOTE),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Tab,
+    Space,
+    Server,
+}
+
+impl Scope {
+    fn next(self) -> Self {
+        match self {
+            Self::Tab => Self::Space,
+            Self::Space => Self::Server,
+            Self::Server => Self::Tab,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tab => "tab",
+            Self::Space => "space",
+            Self::Server => "server",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Tab => 0,
+            Self::Space => 1,
+            Self::Server => 2,
+        }
+    }
+}
+
+fn main() {
+    let result = match env::args().nth(1).as_deref() {
+        Some("open") => open_picker(),
+        Some("picker") => run_picker(),
+        Some("extract") => extract_stdin(),
+        _ => {
+            eprintln!("usage: scoopr <open|picker|extract>");
+            Err("unknown command".into())
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("scoopr: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn open_picker() -> Result<(), Box<dyn std::error::Error>> {
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let target_pane = target_pane();
+    let target_tab = target_tab();
+    let target_workspace = target_workspace();
+    let mut command = Command::new(herdr);
+    command.args([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "picker",
+        "--placement",
+        "popup",
+        "--focus",
+    ]);
+
+    if let Some(target) = target_pane {
+        command.args(["--env", &format!("SCOOPR_TARGET_PANE={target}")]);
+    }
+    if let Some(tab) = target_tab {
+        command.args(["--env", &format!("SCOOPR_TARGET_TAB={tab}")]);
+    }
+    if let Some(workspace) = target_workspace {
+        command.args(["--env", &format!("SCOOPR_TARGET_WORKSPACE={workspace}")]);
+    }
+
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("Herdr could not open the picker ({status})").into());
+    }
+    Ok(())
+}
+
+fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
+    let target = target_pane().ok_or("could not determine the originating pane")?;
+    let tab = target_tab().ok_or("could not determine the originating tab")?;
+    let workspace = target_workspace().ok_or("could not determine the originating space")?;
+    let scope = Scope::Tab;
+    let text = read_scope(scope, &tab, &workspace)?;
+    let candidates = extract_candidates(&text);
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, Show)?;
+
+    let result = picker_loop(&mut stdout, &target, &tab, &workspace, scope, candidates);
+
+    disable_raw_mode()?;
+    execute!(stdout, Show, LeaveAlternateScreen)?;
+    result
+}
+
+fn picker_loop(
+    stdout: &mut io::Stdout,
+    target: &str,
+    tab: &str,
+    workspace: &str,
+    mut scope: Scope,
+    mut candidates: Vec<Candidate>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut filter = Filter::All;
+    let mut query = String::new();
+    let mut selected = usize::MAX;
+    let mut horizontal_offset = 0usize;
+    let mut matcher = FzfV2::new();
+    let mut parser = FzfParser::new();
+    let mut cached_scopes: [Option<Vec<Candidate>>; 3] = [None, None, None];
+
+    loop {
+        let filtered = ranked_matches(&candidates, filter, &query, &mut matcher, &mut parser);
+        if filtered.is_empty() {
+            selected = 0;
+        } else if selected >= filtered.len() {
+            selected = filtered.len().saturating_sub(1);
+        }
+
+        let (width, height) = size().unwrap_or((80, 20));
+        let padding_row = height.saturating_sub(4);
+        let instructions_row = height.saturating_sub(3);
+        let divider_row = height.saturating_sub(2);
+        let prompt_row = height.saturating_sub(1);
+        let visible_rows = usize::from(height.saturating_sub(4)).max(1);
+        let option_width = usize::from(width.saturating_sub(3));
+        let horizontal_page_width = option_width.saturating_sub(1).max(1);
+        let max_horizontal_offset = filtered
+            .iter()
+            .map(|(candidate, _)| {
+                candidate
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(horizontal_page_width);
+        horizontal_offset = horizontal_offset.min(max_horizontal_offset);
+        let first_visible = if filtered.len() <= visible_rows {
+            0
+        } else if selected >= filtered.len() - visible_rows {
+            filtered.len() - visible_rows
+        } else {
+            selected
+        };
+        let last_visible = (first_visible + visible_rows).min(filtered.len());
+        let visible = if filtered.is_empty() {
+            &filtered[0..0]
+        } else {
+            &filtered[first_visible..last_visible]
+        };
+        let first_option_row = padding_row.saturating_sub(visible.len() as u16);
+
+        execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+        for (offset, (candidate, positions)) in visible.iter().enumerate() {
+            let index = first_visible + offset;
+            render_option(
+                stdout,
+                first_option_row + offset as u16,
+                width,
+                candidate,
+                positions,
+                index == selected,
+                horizontal_offset,
+            )?;
+        }
+        if filtered.is_empty() {
+            render_plain(
+                stdout,
+                padding_row.saturating_sub(1),
+                width,
+                "  No matches",
+                Color::DarkGrey,
+            )?;
+        }
+        render_instructions(stdout, instructions_row, width, scope, filter)?;
+        let divider = "─".repeat(usize::from(width.saturating_sub(1)));
+        render_plain(stdout, divider_row, width, &divider, Color::DarkGrey)?;
+        render_prompt(stdout, prompt_row, width, &query)?;
+        stdout.flush()?;
+
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event::read()?
+        {
+            match (code, modifiers) {
+                (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                    drop(filtered);
+                    cached_scopes[scope.index()] = Some(candidates);
+                    scope = scope.next();
+                    candidates = match cached_scopes[scope.index()].take() {
+                        Some(cached) => cached,
+                        None => extract_candidates(&read_scope(scope, tab, workspace)?),
+                    };
+                    selected = usize::MAX;
+                    horizontal_offset = 0;
+                }
+                (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                    if let Some(new_filter) = choose_filter(stdout, width, height, scope, filter)? {
+                        filter = new_filter;
+                        selected = usize::MAX;
+                        horizontal_offset = 0;
+                    }
+                }
+                (KeyCode::Up, _) => selected = selected.saturating_sub(1),
+                (KeyCode::Down, _) => {
+                    if selected + 1 < filtered.len() {
+                        selected += 1;
+                    }
+                }
+                (KeyCode::Left, _) => {
+                    horizontal_offset = horizontal_offset.saturating_sub(HORIZONTAL_PAN_STEP);
+                }
+                (KeyCode::Right, _) => {
+                    horizontal_offset = horizontal_offset
+                        .saturating_add(HORIZONTAL_PAN_STEP)
+                        .min(max_horizontal_offset);
+                }
+                (KeyCode::Backspace, _) => {
+                    query.pop();
+                    selected = usize::MAX;
+                    horizontal_offset = 0;
+                }
+                (KeyCode::Tab, _) => {
+                    if let Some((value, _)) = filtered.get(selected) {
+                        copy_to_clipboard(stdout, value)?;
+                        return Ok(());
+                    }
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some((value, _)) = filtered.get(selected) {
+                        send_text(target, value)?;
+                        return Ok(());
+                    }
+                }
+                (KeyCode::Char(character), modifiers)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    query.push(character);
+                    selected = usize::MAX;
+                    horizontal_offset = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn render_option(
+    stdout: &mut io::Stdout,
+    row: u16,
+    width: u16,
+    candidate: &str,
+    matched_positions: &[usize],
+    selected: bool,
+    horizontal_offset: usize,
+) -> io::Result<()> {
+    queue!(stdout, MoveTo(0, row))?;
+    if selected {
+        queue!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("▌"),
+            ResetColor,
+            Print(" ")
+        )?;
+    } else {
+        queue!(stdout, Print("  "))?;
+    }
+
+    let max_characters = usize::from(width.saturating_sub(3));
+    let candidate_length = candidate
+        .chars()
+        .filter(|character| !character.is_control())
+        .count();
+    let has_hidden_left = horizontal_offset > 0;
+    let width_after_left = max_characters.saturating_sub(if has_hidden_left { 1 } else { 0 });
+    let has_hidden_right = candidate_length.saturating_sub(horizontal_offset) > width_after_left;
+    let content_width = width_after_left.saturating_sub(if has_hidden_right { 1 } else { 0 });
+
+    if has_hidden_left {
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print("‹"),
+            ResetColor
+        )?;
+    }
+
+    let mut rendered_characters = 0usize;
+    let mut displayable_index = 0usize;
+    for (index, character) in candidate.chars().enumerate() {
+        if character.is_control() {
+            continue;
+        }
+        if displayable_index < horizontal_offset {
+            displayable_index += 1;
+            continue;
+        }
+        if rendered_characters >= content_width {
+            break;
+        }
+        if matched_positions.contains(&index) {
+            queue!(
+                stdout,
+                SetForegroundColor(Color::Yellow),
+                SetAttribute(Attribute::Bold),
+                Print(character),
+                SetAttribute(Attribute::Reset),
+                ResetColor
+            )?;
+        } else {
+            queue!(stdout, Print(character))?;
+        }
+        rendered_characters += 1;
+        displayable_index += 1;
+    }
+    if has_hidden_right {
+        queue!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print("›"),
+            ResetColor
+        )?;
+    }
+    Ok(())
+}
+
+fn render_plain(
+    stdout: &mut io::Stdout,
+    row: u16,
+    width: u16,
+    text: &str,
+    color: Color,
+) -> io::Result<()> {
+    let rendered: String = text
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .map(|character| if character == '\t' { ' ' } else { character })
+        .take(usize::from(width.saturating_sub(1)))
+        .collect();
+    queue!(
+        stdout,
+        MoveTo(0, row),
+        SetForegroundColor(color),
+        Print(rendered),
+        ResetColor
+    )
+}
+
+fn render_instructions(
+    stdout: &mut io::Stdout,
+    row: u16,
+    width: u16,
+    scope: Scope,
+    filter: Filter,
+) -> io::Result<()> {
+    #[derive(Clone, Copy)]
+    enum SegmentColor {
+        Normal,
+        Accent,
+        State,
+    }
+
+    let scope_state = format!("[{}]", scope.label());
+    let filter_state = format!("[{}]", filter.label());
+    let segments = [
+        ("  tab", SegmentColor::Normal),
+        ("=copy", SegmentColor::Accent),
+        (", enter", SegmentColor::Normal),
+        ("=insert", SegmentColor::Accent),
+        (", ↑/↓", SegmentColor::Normal),
+        ("=move", SegmentColor::Accent),
+        (", ←/→", SegmentColor::Normal),
+        ("=pan", SegmentColor::Accent),
+        (", ^s", SegmentColor::Normal),
+        ("=scope", SegmentColor::Accent),
+        (scope_state.as_str(), SegmentColor::State),
+        (", ^f", SegmentColor::Normal),
+        ("=filter", SegmentColor::Accent),
+        (filter_state.as_str(), SegmentColor::State),
+        (", esc", SegmentColor::Normal),
+        ("=cancel", SegmentColor::Accent),
+    ];
+    let max_characters = usize::from(width.saturating_sub(1));
+    let mut rendered = 0usize;
+
+    queue!(
+        stdout,
+        MoveTo(0, row),
+        SetAttribute(Attribute::Reset),
+        ResetColor
+    )?;
+    for (text, color) in segments {
+        let segment: String = text
+            .chars()
+            .take(max_characters.saturating_sub(rendered))
+            .collect();
+        if segment.is_empty() {
+            break;
+        }
+        match color {
+            SegmentColor::Normal => queue!(stdout, ResetColor)?,
+            SegmentColor::Accent => queue!(stdout, SetForegroundColor(Color::Cyan))?,
+            SegmentColor::State => queue!(stdout, SetForegroundColor(Color::Yellow))?,
+        }
+        rendered += segment.chars().count();
+        queue!(stdout, Print(segment))?;
+    }
+    queue!(stdout, ResetColor)
+}
+
+fn choose_filter(
+    stdout: &mut io::Stdout,
+    terminal_width: u16,
+    terminal_height: u16,
+    scope: Scope,
+    current: Filter,
+) -> io::Result<Option<Filter>> {
+    const OPTIONS: [(char, &str, Filter); 7] = [
+        ('a', "all", Filter::All),
+        ('w', "word", Filter::Word),
+        ('l', "line", Filter::Line),
+        ('p', "path", Filter::Path),
+        ('u', "url", Filter::Url),
+        ('h', "hash", Filter::Hash),
+        ('q', "quote", Filter::Quote),
+    ];
+    const BOX_WIDTH: u16 = 11;
+    const BOX_HEIGHT: u16 = 9;
+
+    let width = BOX_WIDTH.min(terminal_width);
+    let height = BOX_HEIGHT.min(terminal_height);
+    let before_filter_state = format!(
+        "  tab=copy, enter=insert, ↑/↓=move, ←/→=pan, ^s=scope[{}], ^f=filter",
+        scope.label()
+    );
+    let filter_anchor = before_filter_state.chars().count() as u16;
+    let filter_state_width = current.label().chars().count() as u16 + 2;
+    let filter_state_center = filter_anchor + filter_state_width / 2;
+    let left = filter_state_center
+        .saturating_sub(width / 2)
+        .min(terminal_width.saturating_sub(width));
+    let instructions_row = terminal_height.saturating_sub(3);
+    let top = instructions_row.saturating_sub(height);
+    let inner_width = usize::from(width.saturating_sub(2));
+    let horizontal_border = "─".repeat(inner_width);
+
+    queue!(
+        stdout,
+        Hide,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(Color::DarkGrey),
+        MoveTo(left, top),
+        Print(format!("┌{horizontal_border}┐"))
+    )?;
+
+    for (row, (shortcut, label, filter)) in OPTIONS
+        .iter()
+        .take(usize::from(height.saturating_sub(2)))
+        .enumerate()
+    {
+        let active = *filter == current;
+        let content_padding = inner_width.saturating_sub(3 + label.chars().count());
+        queue!(
+            stdout,
+            MoveTo(left, top + 1 + row as u16),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::DarkGrey),
+            Print("│"),
+            ResetColor,
+            Print(" ")
+        )?;
+        if active {
+            queue!(stdout, SetAttribute(Attribute::Bold))?;
+        }
+        queue!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print(shortcut),
+            ResetColor,
+            Print(" "),
+            Print(label),
+            Print(" ".repeat(content_padding)),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::DarkGrey),
+            Print("│")
+        )?;
+    }
+
+    if height >= 2 {
+        queue!(
+            stdout,
+            MoveTo(left, top + height - 1),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("└{horizontal_border}┘")),
+            ResetColor
+        )?;
+    }
+    stdout.flush()?;
+
+    loop {
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event::read()?
+        {
+            let choice = match (code, modifiers) {
+                (KeyCode::Esc, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => None,
+                (KeyCode::Char(character), modifiers)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if let Some(filter) = Filter::from_key(character) {
+                        Some(filter)
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+            queue!(stdout, Show)?;
+            stdout.flush()?;
+            return Ok(choice);
+        }
+    }
+}
+
+fn render_prompt(stdout: &mut io::Stdout, row: u16, width: u16, query: &str) -> io::Result<()> {
+    let available = usize::from(width.saturating_sub(3));
+    let mut tail: Vec<char> = query.chars().rev().take(available).collect();
+    tail.reverse();
+    let visible_query: String = tail.into_iter().collect();
+    queue!(
+        stdout,
+        MoveTo(0, row),
+        SetForegroundColor(Color::Cyan),
+        SetAttribute(Attribute::Bold),
+        Print("> "),
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+        Print(visible_query),
+        Show
+    )
+}
+
+fn read_pane(target: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let output = Command::new(herdr)
+        .args([
+            "pane",
+            "read",
+            target,
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            ALL_AVAILABLE_PANE_LINES,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string()
+            .into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn read_scope(
+    scope: Scope,
+    tab: &str,
+    workspace: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let mut command = Command::new(&herdr);
+    command.args(["pane", "list"]);
+    if scope != Scope::Server {
+        command.args(["--workspace", workspace]);
+    }
+
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string()
+            .into());
+    }
+
+    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let pane_ids = pane_ids_in_scope(&response, scope, tab, workspace);
+    if pane_ids.is_empty() {
+        return Err(format!("could not find any panes in {} scope", scope.label()).into());
+    }
+
+    let mut combined = String::new();
+    let mut successful_reads = 0usize;
+    for pane_id in pane_ids {
+        if let Ok(text) = read_pane(&pane_id) {
+            if !combined.is_empty() && !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push_str(&text);
+            successful_reads += 1;
+        }
+    }
+
+    if successful_reads == 0 {
+        return Err(format!("could not read any panes in {} scope", scope.label()).into());
+    }
+    Ok(combined)
+}
+
+fn pane_ids_in_scope(value: &Value, scope: Scope, tab: &str, workspace: &str) -> Vec<String> {
+    fn visit(
+        value: &Value,
+        scope: Scope,
+        tab: &str,
+        workspace: &str,
+        seen: &mut HashSet<String>,
+        panes: &mut Vec<String>,
+    ) {
+        match value {
+            Value::Object(object) => {
+                let is_in_scope = match scope {
+                    Scope::Tab => object.get("tab_id").and_then(Value::as_str) == Some(tab),
+                    Scope::Space => {
+                        object.get("workspace_id").and_then(Value::as_str) == Some(workspace)
+                    }
+                    Scope::Server => true,
+                };
+                if is_in_scope {
+                    if let Some(pane_id) = object.get("pane_id").and_then(Value::as_str) {
+                        if seen.insert(pane_id.to_string()) {
+                            panes.push(pane_id.to_string());
+                        }
+                    }
+                }
+                for nested in object.values() {
+                    visit(nested, scope, tab, workspace, seen, panes);
+                }
+            }
+            Value::Array(values) => {
+                for nested in values {
+                    visit(nested, scope, tab, workspace, seen, panes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut panes = Vec::new();
+    visit(value, scope, tab, workspace, &mut seen, &mut panes);
+    panes
+}
+
+fn send_text(target: &str, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let status = Command::new(herdr)
+        .args(["pane", "send-text", target, text])
+        .status()?;
+    if !status.success() {
+        return Err(format!("Herdr could not insert text ({status})").into());
+    }
+    Ok(())
+}
+
+fn copy_to_clipboard(stdout: &mut io::Stdout, text: &str) -> io::Result<()> {
+    let encoded = encode_base64(text.as_bytes());
+    write!(stdout, "\x1b]52;c;{encoded}\x07")?;
+    stdout.flush()
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(((input.len() + 2) / 3) * 4);
+    let mut index = 0usize;
+
+    while index < input.len() {
+        let first = input[index];
+        let second = input.get(index + 1).copied().unwrap_or(0);
+        let third = input.get(index + 2).copied().unwrap_or(0);
+
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if index + 1 < input.len() {
+            output.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if index + 2 < input.len() {
+            output.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        index += 3;
+    }
+    output
+}
+
+fn extract_stdin() -> Result<(), Box<dyn std::error::Error>> {
+    let mut text = String::new();
+    io::stdin().read_to_string(&mut text)?;
+    for candidate in extract_candidates(&text) {
+        println!("{}", candidate.text);
+    }
+    Ok(())
+}
+
+fn extract_candidates(text: &str) -> Vec<Candidate> {
+    let mut indices = HashMap::new();
+    let mut candidates = Vec::new();
+
+    for line in text.lines().map(str::trim).filter(|line| line.len() >= 3) {
+        add_candidate(&mut candidates, &mut indices, line, KIND_LINE);
+        for quoted in quoted_values(line) {
+            add_candidate(&mut candidates, &mut indices, quoted, KIND_QUOTE);
+        }
+    }
+
+    for raw_token in text.split_whitespace() {
+        let word = clean_token(raw_token);
+        add_candidate(&mut candidates, &mut indices, &word, KIND_WORD);
+
+        let structured = clean_structured_token(raw_token);
+        if looks_like_url(&structured) {
+            add_candidate(&mut candidates, &mut indices, &structured, KIND_URL);
+        }
+        if looks_like_path(&structured) {
+            add_candidate(&mut candidates, &mut indices, &structured, KIND_PATH);
+        }
+        if looks_like_hash(&structured) {
+            add_candidate(&mut candidates, &mut indices, &structured, KIND_HASH);
+        }
+    }
+
+    candidates
+}
+
+fn add_candidate(
+    candidates: &mut Vec<Candidate>,
+    indices: &mut HashMap<String, usize>,
+    text: &str,
+    kind: u8,
+) {
+    let text = text.trim();
+    if text.chars().count() < 3 {
+        return;
+    }
+
+    if let Some(index) = indices.get(text).copied() {
+        candidates[index].kinds |= kind;
+    } else {
+        let index = candidates.len();
+        indices.insert(text.to_string(), index);
+        candidates.push(Candidate {
+            text: text.to_string(),
+            kinds: kind,
+        });
+    }
+}
+
+fn clean_token(token: &str) -> String {
+    token
+        .trim_matches(|character: char| ",;:()[]{}<>\"'‘’“”".contains(character))
+        .to_string()
+}
+
+fn clean_structured_token(token: &str) -> String {
+    token
+        .trim_matches(|character: char| ",;()[]{}<>\"'‘’“”".contains(character))
+        .trim_end_matches(|character: char| character == '.' || character == ':')
+        .to_string()
+}
+
+fn looks_like_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "http://", "https://", "git@", "git://", "ssh://", "ftp://", "sftp://", "file:///",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn looks_like_path(value: &str) -> bool {
+    if value.len() < 3 || looks_like_url(value) || value.contains("://") {
+        return false;
+    }
+
+    let parts: Vec<&str> = value.split('/').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+
+    let looks_like_ratio = parts.len() == 2
+        && parts.iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        });
+    let looks_like_speed = parts.len() == 2
+        && parts[1].eq_ignore_ascii_case("s")
+        && parts[0]
+            .chars()
+            .all(|character| character.is_ascii_digit() || "kmgKMG.".contains(character));
+
+    !looks_like_ratio && !looks_like_speed
+}
+
+fn looks_like_hash(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let (hash, prefixed) = ["sha1:", "sha224:", "sha256:", "sha384:", "sha512:"]
+        .iter()
+        .find_map(|prefix| lower.strip_prefix(*prefix).map(|hash| (hash, true)))
+        .unwrap_or((lower.as_str(), false));
+
+    (7..=128).contains(&hash.len())
+        && hash.chars().all(|character| character.is_ascii_hexdigit())
+        && (prefixed
+            || hash
+                .chars()
+                .any(|character| character.is_ascii_alphabetic()))
+}
+
+fn quoted_values(line: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut active: Option<(char, usize)> = None;
+    let mut previous = None;
+
+    for (byte_index, character) in line.char_indices() {
+        if let Some((closing, content_start)) = active {
+            if character == closing {
+                let value = line[content_start..byte_index].trim();
+                if value.chars().count() >= 3 {
+                    values.push(value);
+                }
+                active = None;
+            }
+        } else {
+            let closing = match character {
+                '"' => Some('"'),
+                '\'' if previous.map_or(true, |value: char| !value.is_alphanumeric()) => Some('\''),
+                '“' => Some('”'),
+                '‘' => Some('’'),
+                _ => None,
+            };
+            if let Some(closing) = closing {
+                active = Some((closing, byte_index + character.len_utf8()));
+            }
+        }
+        previous = Some(character);
+    }
+
+    values
+}
+
+fn ranked_matches<'a>(
+    candidates: &'a [Candidate],
+    filter: Filter,
+    query: &str,
+    matcher: &mut FzfV2,
+    parser: &mut FzfParser,
+) -> Vec<(&'a String, Vec<usize>)> {
+    if query.is_empty() {
+        return candidates
+            .iter()
+            .filter(|candidate| candidate.appears_in(filter))
+            .map(|candidate| (&candidate.text, Vec::new()))
+            .collect();
+    }
+
+    let (normalized_query, _) = normalize_for_match(query);
+    let query = parser.parse(&normalized_query);
+    let mut ranked = candidates
+        .iter()
+        .filter(|candidate| candidate.appears_in(filter))
+        .enumerate()
+        .filter_map(|(original_index, candidate)| {
+            let (normalized_candidate, original_character_indices) =
+                normalize_for_match(&candidate.text);
+            let mut ranges = Vec::new();
+            let distance =
+                matcher.distance_and_ranges(query, &normalized_candidate, &mut ranges)?;
+            let literal_rank = literal_match_rank(&normalized_candidate, &normalized_query);
+            let positions = normalized_candidate
+                .char_indices()
+                .enumerate()
+                .filter_map(|(normalized_character_index, (byte_index, _))| {
+                    ranges
+                        .iter()
+                        .any(|range| range.contains(&byte_index))
+                        .then(|| original_character_indices[normalized_character_index])
+                })
+                .collect();
+            Some((
+                &candidate.text,
+                positions,
+                literal_rank,
+                distance,
+                original_index,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // The UI is bottom-up and selects the final row, so put the best fzf
+    // result last. Literal phrases outrank fuzzy-only matches, and stable
+    // source order breaks equal-score ties in favor of newer candidates.
+    ranked.sort_by(|left, right| {
+        left.2
+            .cmp(&right.2)
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.4.cmp(&right.4))
+    });
+    ranked
+        .into_iter()
+        .map(|(candidate, positions, _, _, _)| (candidate, positions))
+        .collect()
+}
+
+fn normalize_for_match(text: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::with_capacity(text.len());
+    let mut original_character_indices = Vec::with_capacity(text.chars().count());
+
+    for (character_index, character) in text.chars().enumerate() {
+        let character = match character {
+            '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{ff02}' => '"',
+            _ => character,
+        };
+        normalized.push(character);
+        original_character_indices.push(character_index);
+    }
+
+    (normalized, original_character_indices)
+}
+
+fn literal_match_rank(candidate: &str, query: &str) -> u8 {
+    let candidate = candidate.to_lowercase();
+    let query = query.to_lowercase();
+
+    if candidate == query {
+        3
+    } else if candidate.starts_with(&query) {
+        2
+    } else if candidate.contains(&query) {
+        1
+    } else {
+        0
+    }
+}
+
+fn target_pane() -> Option<String> {
+    env::var("SCOOPR_TARGET_PANE")
+        .ok()
+        .or_else(|| env::var("HERDR_PANE_ID").ok())
+        .or_else(|| context_string(&["focused_pane_id", "pane_id", "target_pane_id"]))
+}
+
+fn target_tab() -> Option<String> {
+    env::var("SCOOPR_TARGET_TAB")
+        .ok()
+        .or_else(|| env::var("HERDR_TAB_ID").ok())
+        .or_else(|| context_string(&["tab_id", "focused_tab_id", "target_tab_id"]))
+}
+
+fn target_workspace() -> Option<String> {
+    env::var("SCOOPR_TARGET_WORKSPACE")
+        .ok()
+        .or_else(|| env::var("HERDR_WORKSPACE_ID").ok())
+        .or_else(|| {
+            context_string(&[
+                "workspace_id",
+                "focused_workspace_id",
+                "target_workspace_id",
+            ])
+        })
+}
+
+fn context_string(keys: &[&str]) -> Option<String> {
+    let context = env::var("HERDR_PLUGIN_CONTEXT_JSON").ok()?;
+    let value: Value = serde_json::from_str(&context).ok()?;
+    find_context_string(&value, keys)
+}
+
+fn find_context_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for key in keys {
+                if let Some(Value::String(value)) = object.get(*key) {
+                    return Some(value.clone());
+                }
+            }
+            object
+                .values()
+                .find_map(|value| find_context_string(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_context_string(value, keys)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        encode_base64, extract_candidates, pane_ids_in_scope, ranked_matches, Candidate, Filter,
+        Scope, KIND_WORD,
+    };
+    use norm::fzf::{FzfParser, FzfV2};
+    use serde_json::json;
+
+    fn word_candidates(values: &[&str]) -> Vec<Candidate> {
+        values
+            .iter()
+            .map(|value| Candidate {
+                text: (*value).to_string(),
+                kinds: KIND_WORD,
+            })
+            .collect()
+    }
+
+    fn values_for_filter(candidates: &[Candidate], filter: Filter) -> Vec<&str> {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.appears_in(filter))
+            .map(|candidate| candidate.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn encodes_osc52_payloads() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64("scoop 🥄".as_bytes()), "c2Nvb3Ag8J+lhA==");
+    }
+
+    #[test]
+    fn ranks_a_contiguous_word_as_the_selected_last_result() {
+        let candidates = word_candidates(&[
+            "w_o_r_d spread across a weak match",
+            "the exact word is here",
+            "another wandering odd result, deliberately",
+        ]);
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(&candidates, Filter::All, "word", &mut matcher, &mut parser);
+
+        assert_eq!(
+            ranked.last().map(|(candidate, _)| candidate.as_str()),
+            Some("the exact word is here")
+        );
+    }
+
+    #[test]
+    fn ranks_a_literal_multi_term_prefix_above_reordered_terms() {
+        let candidates = word_candidates(&["pane ...... 1", "1 package"]);
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(&candidates, Filter::All, "1 pa", &mut matcher, &mut parser);
+
+        assert_eq!(
+            ranked.last().map(|(candidate, _)| candidate.as_str()),
+            Some("1 package")
+        );
+    }
+
+    #[test]
+    fn treats_straight_and_typographic_apostrophes_as_equivalent() {
+        let candidates = word_candidates(&["Earlier you wrote I’m here"]);
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(&candidates, Filter::All, "I'm", &mut matcher, &mut parser);
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0, "Earlier you wrote I’m here");
+        assert_eq!(ranked[0].1, [18, 19, 20]);
+    }
+
+    #[test]
+    fn cycles_through_all_scopes() {
+        assert_eq!(Scope::Tab.next(), Scope::Space);
+        assert_eq!(Scope::Space.next(), Scope::Server);
+        assert_eq!(Scope::Server.next(), Scope::Tab);
+        assert_eq!(Scope::Tab.index(), 0);
+        assert_eq!(Scope::Space.index(), 1);
+        assert_eq!(Scope::Server.index(), 2);
+    }
+
+    #[test]
+    fn selects_filters_by_shortcut() {
+        assert_eq!(Filter::from_key('a'), Some(Filter::All));
+        assert_eq!(Filter::from_key('W'), Some(Filter::Word));
+        assert_eq!(Filter::from_key('l'), Some(Filter::Line));
+        assert_eq!(Filter::from_key('p'), Some(Filter::Path));
+        assert_eq!(Filter::from_key('u'), Some(Filter::Url));
+        assert_eq!(Filter::from_key('h'), Some(Filter::Hash));
+        assert_eq!(Filter::from_key('q'), Some(Filter::Quote));
+        assert_eq!(Filter::from_key('x'), None);
+    }
+
+    #[test]
+    fn tags_structured_candidates_for_filtering() {
+        let candidates = extract_candidates(
+            "open /tmp/report.txt at https://example.com/a\n\
+             commit deadbeef says \"hello world\"",
+        );
+
+        assert!(values_for_filter(&candidates, Filter::Path).contains(&"/tmp/report.txt"));
+        assert!(values_for_filter(&candidates, Filter::Url).contains(&"https://example.com/a"));
+        assert!(values_for_filter(&candidates, Filter::Hash).contains(&"deadbeef"));
+        assert!(values_for_filter(&candidates, Filter::Quote).contains(&"hello world"));
+    }
+
+    #[test]
+    fn collects_panes_for_each_scope() {
+        let response = json!({
+            "id": "cli:pane",
+            "result": {
+                "panes": [
+                    { "pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1" },
+                    { "pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1" },
+                    { "pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1" },
+                    { "pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            pane_ids_in_scope(&response, Scope::Tab, "w1:t1", "w1"),
+            ["w1:p1".to_string(), "w1:p2".to_string()]
+        );
+        assert_eq!(
+            pane_ids_in_scope(&response, Scope::Space, "w1:t1", "w1"),
+            [
+                "w1:p1".to_string(),
+                "w1:p2".to_string(),
+                "w1:p3".to_string()
+            ]
+        );
+        assert_eq!(
+            pane_ids_in_scope(&response, Scope::Server, "w1:t1", "w1"),
+            [
+                "w1:p1".to_string(),
+                "w1:p2".to_string(),
+                "w1:p3".to_string(),
+                "w2:p1".to_string()
+            ]
+        );
+    }
+}
