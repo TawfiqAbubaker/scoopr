@@ -1445,32 +1445,22 @@ fn ranked_matches<'a>(
                 literal_rank,
                 distance,
                 original_index,
-                candidate.kinds & KIND_LINE != 0,
             ))
         })
         .collect::<Vec<_>>();
 
-    // The UI is bottom-up and selects the final row. Keep line candidates in
-    // their own total-order group so newer terminal lines win among lines,
-    // while words and structured candidates retain match-quality ranking.
+    // The UI is bottom-up and selects the final row. Match quality comes
+    // first; source order only breaks otherwise comparable matches so a
+    // newer result wins without displacing a much stronger match.
     ranked.sort_by(|left, right| {
-        left.5.cmp(&right.5).then_with(|| {
-            if left.5 {
-                left.4
-                    .cmp(&right.4)
-                    .then_with(|| left.2.cmp(&right.2))
-                    .then_with(|| right.3.cmp(&left.3))
-            } else {
-                left.2
-                    .cmp(&right.2)
-                    .then_with(|| right.3.cmp(&left.3))
-                    .then_with(|| left.4.cmp(&right.4))
-            }
-        })
+        left.2
+            .cmp(&right.2)
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.4.cmp(&right.4))
     });
     ranked
         .into_iter()
-        .map(|(candidate, positions, _, _, _, _)| (candidate, positions))
+        .map(|(candidate, positions, _, _, _)| (candidate, positions))
         .collect()
 }
 
@@ -1630,11 +1620,11 @@ mod tests {
     fn prefers_the_newer_matching_terminal_line() {
         let candidates = vec![
             Candidate {
-                text: "git add".into(),
+                text: "git add one".into(),
                 kinds: KIND_LINE,
             },
             Candidate {
-                text: "git add src/main.rs".into(),
+                text: "git add two".into(),
                 kinds: KIND_LINE,
             },
         ];
@@ -1651,7 +1641,30 @@ mod tests {
 
         assert_eq!(
             ranked.last().map(|(candidate, _)| candidate.as_str()),
-            Some("git add src/main.rs")
+            Some("git add two")
+        );
+    }
+
+    #[test]
+    fn prefers_a_strong_match_over_a_newer_weak_match() {
+        let candidates = vec![
+            Candidate {
+                text: "git push".into(),
+                kinds: KIND_LINE,
+            },
+            Candidate {
+                text: "scoopr git:(main)".into(),
+                kinds: KIND_LINE,
+            },
+        ];
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(&candidates, Filter::All, "git p", &mut matcher, &mut parser);
+
+        assert_eq!(
+            ranked.last().map(|(candidate, _)| candidate.as_str()),
+            Some("git push")
         );
     }
 
