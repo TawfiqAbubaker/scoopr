@@ -1441,6 +1441,7 @@ fn ranked_matches<'a>(
                 literal_rank,
                 distance,
                 original_index,
+                candidate.kinds & KIND_LINE != 0,
             ))
         })
         .collect::<Vec<_>>();
@@ -1449,14 +1450,25 @@ fn ranked_matches<'a>(
     // result last. Literal phrases outrank fuzzy-only matches, and stable
     // source order breaks equal-score ties in favor of newer candidates.
     ranked.sort_by(|left, right| {
-        left.2
-            .cmp(&right.2)
-            .then_with(|| right.3.cmp(&left.3))
-            .then_with(|| left.4.cmp(&right.4))
+        if left.5 && right.5 {
+            // Terminal lines are ordered from top to bottom during
+            // extraction, so the later line should win when both lines
+            // match the query. This keeps the picker useful for commands
+            // that have been repeated with newer arguments.
+            left.4
+                .cmp(&right.4)
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| right.3.cmp(&left.3))
+        } else {
+            left.2
+                .cmp(&right.2)
+                .then_with(|| right.3.cmp(&left.3))
+                .then_with(|| left.4.cmp(&right.4))
+        }
     });
     ranked
         .into_iter()
-        .map(|(candidate, positions, _, _, _)| (candidate, positions))
+        .map(|(candidate, positions, _, _, _, _)| (candidate, positions))
         .collect()
 }
 
@@ -1548,7 +1560,7 @@ fn find_context_string(value: &Value, keys: &[&str]) -> Option<String> {
 mod tests {
     use super::{
         encode_base64, extract_candidates, pane_ids_in_scope, ranked_matches, Candidate, Filter,
-        Scope, KIND_WORD,
+        Scope, KIND_LINE, KIND_WORD,
     };
     use norm::fzf::{FzfParser, FzfV2};
     use serde_json::json;
@@ -1609,6 +1621,35 @@ mod tests {
         assert_eq!(
             ranked.last().map(|(candidate, _)| candidate.as_str()),
             Some("1 package")
+        );
+    }
+
+    #[test]
+    fn prefers_the_newer_matching_terminal_line() {
+        let candidates = vec![
+            Candidate {
+                text: "git add".into(),
+                kinds: KIND_LINE,
+            },
+            Candidate {
+                text: "git add src/main.rs".into(),
+                kinds: KIND_LINE,
+            },
+        ];
+        let mut matcher = FzfV2::new();
+        let mut parser = FzfParser::new();
+
+        let ranked = ranked_matches(
+            &candidates,
+            Filter::All,
+            "git add",
+            &mut matcher,
+            &mut parser,
+        );
+
+        assert_eq!(
+            ranked.last().map(|(candidate, _)| candidate.as_str()),
+            Some("git add src/main.rs")
         );
     }
 

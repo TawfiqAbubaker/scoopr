@@ -105,6 +105,8 @@ Scoopr opens with the scrollback from every pane in the current tab. It keeps th
 
 Filters are `all`, `word`, `line`, `path`, `url`, `hash`, and `quote`. Search treats straight and typographic quotation marks as equivalent while preserving the original text in copied and inserted results.
 
+When multiple terminal lines match, the newer line lower in the scrollback wins the default selection. This makes a recent command with new arguments take precedence over an older repeated command.
+
 ## Development
 
 Run the formatter, tests, and checks locally:
