@@ -40,7 +40,7 @@ const SETUP_END: &str = "# <<< scoopr keybinding <<<";
 const DEFAULT_PLUGIN_CONFIG: &str = r#"# Scoopr settings. Remove a setting to use its default.
 
 [behavior]
-default_scope = "tab"
+default_scope = "space"
 default_filter = "all"
 
 [keys]
@@ -100,7 +100,7 @@ impl Default for Config {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            default_scope: "tab".into(),
+            default_scope: "space".into(),
             default_filter: "all".into(),
         }
     }
@@ -215,11 +215,10 @@ enum Scope {
 impl Scope {
     fn next(self, skip_tab: bool) -> Self {
         match self {
-            Self::Tab if skip_tab => Self::Server,
-            Self::Tab => Self::Space,
-            Self::Space => Self::Server,
-            Self::Server if skip_tab => Self::Space,
-            Self::Server => Self::Tab,
+            Self::Space if skip_tab => Self::Server,
+            Self::Space => Self::Tab,
+            Self::Tab => Self::Server,
+            Self::Server => Self::Space,
         }
     }
 
@@ -605,11 +604,7 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
     let tab = target_tab().ok_or("could not determine the originating tab")?;
     let workspace = target_workspace().ok_or("could not determine the originating space")?;
     let skip_tab = workspace_tab_count(&workspace)? == 1;
-    let scope = if skip_tab && picker_config.scope == Scope::Tab {
-        Scope::Server
-    } else {
-        picker_config.scope
-    };
+    let scope = picker_config.scope;
     let text = read_scope(scope, &tab, &workspace)?;
     let candidates = extract_candidates(&text);
 
@@ -1779,12 +1774,11 @@ mod tests {
 
     #[test]
     fn cycles_through_all_scopes() {
-        assert_eq!(Scope::Tab.next(false), Scope::Space);
-        assert_eq!(Scope::Space.next(false), Scope::Server);
-        assert_eq!(Scope::Server.next(false), Scope::Tab);
-        assert_eq!(Scope::Tab.next(true), Scope::Server);
-        assert_eq!(Scope::Server.next(true), Scope::Space);
+        assert_eq!(Scope::Space.next(false), Scope::Tab);
+        assert_eq!(Scope::Tab.next(false), Scope::Server);
+        assert_eq!(Scope::Server.next(false), Scope::Space);
         assert_eq!(Scope::Space.next(true), Scope::Server);
+        assert_eq!(Scope::Server.next(true), Scope::Space);
         assert_eq!(Scope::Tab.index(), 0);
         assert_eq!(Scope::Space.index(), 1);
         assert_eq!(Scope::Server.index(), 2);

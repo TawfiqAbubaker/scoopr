@@ -83,7 +83,7 @@ Scoopr's picker settings live separately from Herdr's global keybinding file. Th
 
 ```toml
 [behavior]
-default_scope = "tab"       # tab, space, server
+default_scope = "space"     # space, tab, server
 default_filter = "all"      # all, word, line, path, url, hash, quote
 
 [keys]
