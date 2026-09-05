@@ -4,6 +4,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    str::FromStr,
 };
 
 use crossterm::{
@@ -20,6 +21,7 @@ use norm::{
     fzf::{FzfParser, FzfV2},
     Metric,
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 const PLUGIN_ID: &str = "scoopr";
@@ -34,6 +36,111 @@ const KIND_QUOTE: u8 = 1 << 5;
 const DEFAULT_KEYBINDING: &str = "prefix+shift+c";
 const SETUP_START: &str = "# >>> scoopr keybinding >>>";
 const SETUP_END: &str = "# <<< scoopr keybinding <<<";
+const DEFAULT_PLUGIN_CONFIG: &str = r#"# Scoopr settings. Remove a setting to use its default.
+
+[behavior]
+default_scope = "tab"
+default_filter = "all"
+
+[keys]
+copy = "tab"
+insert = "enter"
+cycle_scope = "ctrl+s"
+open_filter = "ctrl+f"
+cancel = "esc"
+
+[popup]
+width = "80%"
+height = "80%"
+"#;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct Config {
+    behavior: BehaviorConfig,
+    keys: KeysConfig,
+    popup: PopupConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct BehaviorConfig {
+    default_scope: String,
+    default_filter: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct KeysConfig {
+    copy: String,
+    insert: String,
+    cycle_scope: String,
+    open_filter: String,
+    cancel: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct PopupConfig {
+    width: String,
+    height: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            behavior: BehaviorConfig::default(),
+            keys: KeysConfig::default(),
+            popup: PopupConfig::default(),
+        }
+    }
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            default_scope: "tab".into(),
+            default_filter: "all".into(),
+        }
+    }
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            copy: "tab".into(),
+            insert: "enter".into(),
+            cycle_scope: "ctrl+s".into(),
+            open_filter: "ctrl+f".into(),
+            cancel: "esc".into(),
+        }
+    }
+}
+
+impl Default for PopupConfig {
+    fn default() -> Self {
+        Self {
+            width: "80%".into(),
+            height: "80%".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shortcut {
+    Char(char),
+    Ctrl(char),
+    Alt(char),
+    Shift(char),
+    Tab,
+    Enter,
+    Esc,
+    Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Candidate {
@@ -130,6 +237,138 @@ impl Scope {
     }
 }
 
+impl FromStr for Scope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "tab" => Ok(Self::Tab),
+            "space" | "workspace" => Ok(Self::Space),
+            "server" => Ok(Self::Server),
+            _ => Err(format!("unknown scope `{value}`")),
+        }
+    }
+}
+
+impl FromStr for Filter {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "word" => Ok(Self::Word),
+            "line" => Ok(Self::Line),
+            "path" => Ok(Self::Path),
+            "url" => Ok(Self::Url),
+            "hash" => Ok(Self::Hash),
+            "quote" => Ok(Self::Quote),
+            _ => Err(format!("unknown filter `{value}`")),
+        }
+    }
+}
+
+impl FromStr for Shortcut {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim().to_ascii_lowercase();
+        let parts: Vec<&str> = value.split('+').collect();
+        let key = parts.last().copied().unwrap_or_default();
+        let modifiers = &parts[..parts.len().saturating_sub(1)];
+        let modifier = |name: &str| modifiers.iter().any(|part| *part == name);
+
+        if modifier("ctrl") || modifier("control") {
+            return key
+                .chars()
+                .next()
+                .filter(|_| key.chars().count() == 1)
+                .map(Shortcut::Ctrl)
+                .ok_or_else(|| format!("invalid control shortcut `{value}`"));
+        }
+        if modifier("alt") {
+            return key
+                .chars()
+                .next()
+                .filter(|_| key.chars().count() == 1)
+                .map(Shortcut::Alt)
+                .ok_or_else(|| format!("invalid alt shortcut `{value}`"));
+        }
+        if modifier("shift") {
+            return key
+                .chars()
+                .next()
+                .filter(|_| key.chars().count() == 1)
+                .map(Shortcut::Shift)
+                .ok_or_else(|| format!("invalid shift shortcut `{value}`"));
+        }
+
+        match key {
+            "tab" => Ok(Self::Tab),
+            "enter" | "return" => Ok(Self::Enter),
+            "esc" | "escape" => Ok(Self::Esc),
+            "backspace" => Ok(Self::Backspace),
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ if parts.len() == 1 && key.chars().count() == 1 => {
+                Ok(Self::Char(key.chars().next().unwrap()))
+            }
+            _ => Err(format!("unknown shortcut `{value}`")),
+        }
+    }
+}
+
+fn matches_shortcut(code: KeyCode, modifiers: KeyModifiers, shortcut: Shortcut) -> bool {
+    match shortcut {
+        Shortcut::Char(key) => code == KeyCode::Char(key) && modifiers.is_empty(),
+        Shortcut::Ctrl(key) => code == KeyCode::Char(key) && modifiers == KeyModifiers::CONTROL,
+        Shortcut::Alt(key) => code == KeyCode::Char(key) && modifiers == KeyModifiers::ALT,
+        Shortcut::Shift(key) => code == KeyCode::Char(key) && modifiers == KeyModifiers::SHIFT,
+        Shortcut::Tab => code == KeyCode::Tab && modifiers.is_empty(),
+        Shortcut::Enter => code == KeyCode::Enter && modifiers.is_empty(),
+        Shortcut::Esc => code == KeyCode::Esc && modifiers.is_empty(),
+        Shortcut::Backspace => code == KeyCode::Backspace && modifiers.is_empty(),
+        Shortcut::Up => code == KeyCode::Up && modifiers.is_empty(),
+        Shortcut::Down => code == KeyCode::Down && modifiers.is_empty(),
+        Shortcut::Left => code == KeyCode::Left && modifiers.is_empty(),
+        Shortcut::Right => code == KeyCode::Right && modifiers.is_empty(),
+    }
+}
+
+fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let Some(directory) = env::var_os("HERDR_PLUGIN_CONFIG_DIR") else {
+        return Ok(Config::default());
+    };
+    let path = PathBuf::from(directory).join("config.toml");
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+fn parse_configured_picker(config: &Config) -> Result<PickerConfig, Box<dyn std::error::Error>> {
+    Ok(PickerConfig {
+        scope: config.behavior.default_scope.parse()?,
+        filter: config.behavior.default_filter.parse()?,
+        copy: config.keys.copy.parse()?,
+        insert: config.keys.insert.parse()?,
+        cycle_scope: config.keys.cycle_scope.parse()?,
+        open_filter: config.keys.open_filter.parse()?,
+        cancel: config.keys.cancel.parse()?,
+    })
+}
+
+struct PickerConfig {
+    scope: Scope,
+    filter: Filter,
+    copy: Shortcut,
+    insert: Shortcut,
+    cycle_scope: Shortcut,
+    open_filter: Shortcut,
+    cancel: Shortcut,
+}
+
 fn main() {
     let result = match env::args().nth(1).as_deref() {
         Some("open") => open_picker(),
@@ -152,9 +391,13 @@ fn main() {
 fn setup_config() -> Result<(), Box<dyn std::error::Error>> {
     let path = herdr_config_path()?;
     let original = read_config(&path)?;
+    let plugin_config_created = ensure_plugin_config()?;
 
     if original.contains(SETUP_START) || active_command(&original, "scoopr.open") {
         println!("Scoopr is already configured in {}", path.display());
+        if plugin_config_created {
+            println!("Created Scoopr settings at the Herdr plugin config directory.");
+        }
         return Ok(());
     }
 
@@ -179,7 +422,24 @@ fn setup_config() -> Result<(), Box<dyn std::error::Error>> {
         "Added Scoopr's {DEFAULT_KEYBINDING} binding to {}. Reload Herdr with `herdr server reload-config`.",
         path.display()
     );
+    if plugin_config_created {
+        println!("Created Scoopr settings at the Herdr plugin config directory.");
+    }
     Ok(())
+}
+
+fn ensure_plugin_config() -> Result<bool, Box<dyn std::error::Error>> {
+    let Some(directory) = env::var_os("HERDR_PLUGIN_CONFIG_DIR") else {
+        return Ok(false);
+    };
+    let directory = PathBuf::from(directory);
+    let path = directory.join("config.toml");
+    if path.exists() {
+        return Ok(false);
+    }
+    fs::create_dir_all(directory)?;
+    fs::write(path, DEFAULT_PLUGIN_CONFIG)?;
+    Ok(true)
 }
 
 fn remove_setup() -> Result<(), Box<dyn std::error::Error>> {
@@ -297,6 +557,7 @@ fn write_config(
 
 fn open_picker() -> Result<(), Box<dyn std::error::Error>> {
     let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let config = load_config()?;
     let target_pane = target_pane();
     let target_tab = target_tab();
     let target_workspace = target_workspace();
@@ -311,6 +572,10 @@ fn open_picker() -> Result<(), Box<dyn std::error::Error>> {
         "picker",
         "--placement",
         "popup",
+        "--width",
+        &config.popup.width,
+        "--height",
+        &config.popup.height,
         "--focus",
     ]);
 
@@ -332,10 +597,11 @@ fn open_picker() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
+    let picker_config = parse_configured_picker(&load_config()?)?;
     let target = target_pane().ok_or("could not determine the originating pane")?;
     let tab = target_tab().ok_or("could not determine the originating tab")?;
     let workspace = target_workspace().ok_or("could not determine the originating space")?;
-    let scope = Scope::Tab;
+    let scope = picker_config.scope;
     let text = read_scope(scope, &tab, &workspace)?;
     let candidates = extract_candidates(&text);
 
@@ -343,7 +609,15 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, Show)?;
 
-    let result = picker_loop(&mut stdout, &target, &tab, &workspace, scope, candidates);
+    let result = picker_loop(
+        &mut stdout,
+        &target,
+        &tab,
+        &workspace,
+        scope,
+        candidates,
+        picker_config,
+    );
 
     disable_raw_mode()?;
     execute!(stdout, Show, LeaveAlternateScreen)?;
@@ -357,8 +631,9 @@ fn picker_loop(
     workspace: &str,
     mut scope: Scope,
     mut candidates: Vec<Candidate>,
+    config: PickerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut filter = Filter::All;
+    let mut filter = config.filter;
     let mut query = String::new();
     let mut selected = usize::MAX;
     let mut horizontal_offset = 0usize;
@@ -442,8 +717,13 @@ fn picker_loop(
         }) = event::read()?
         {
             match (code, modifiers) {
-                (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
-                (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                (code, modifiers)
+                    if matches_shortcut(code, modifiers, config.cancel)
+                        || (code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL) =>
+                {
+                    return Ok(())
+                }
+                (code, modifiers) if matches_shortcut(code, modifiers, config.cycle_scope) => {
                     drop(filtered);
                     cached_scopes[scope.index()] = Some(candidates);
                     scope = scope.next();
@@ -454,39 +734,41 @@ fn picker_loop(
                     selected = usize::MAX;
                     horizontal_offset = 0;
                 }
-                (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                (code, modifiers) if matches_shortcut(code, modifiers, config.open_filter) => {
                     if let Some(new_filter) = choose_filter(stdout, width, height, scope, filter)? {
                         filter = new_filter;
                         selected = usize::MAX;
                         horizontal_offset = 0;
                     }
                 }
-                (KeyCode::Up, _) => selected = selected.saturating_sub(1),
-                (KeyCode::Down, _) => {
+                (code, modifiers) if code == KeyCode::Up && modifiers.is_empty() => {
+                    selected = selected.saturating_sub(1)
+                }
+                (code, modifiers) if code == KeyCode::Down && modifiers.is_empty() => {
                     if selected + 1 < filtered.len() {
                         selected += 1;
                     }
                 }
-                (KeyCode::Left, _) => {
+                (code, modifiers) if code == KeyCode::Left && modifiers.is_empty() => {
                     horizontal_offset = horizontal_offset.saturating_sub(HORIZONTAL_PAN_STEP);
                 }
-                (KeyCode::Right, _) => {
+                (code, modifiers) if code == KeyCode::Right && modifiers.is_empty() => {
                     horizontal_offset = horizontal_offset
                         .saturating_add(HORIZONTAL_PAN_STEP)
                         .min(max_horizontal_offset);
                 }
-                (KeyCode::Backspace, _) => {
+                (code, modifiers) if code == KeyCode::Backspace && modifiers.is_empty() => {
                     query.pop();
                     selected = usize::MAX;
                     horizontal_offset = 0;
                 }
-                (KeyCode::Tab, _) => {
+                (code, modifiers) if matches_shortcut(code, modifiers, config.copy) => {
                     if let Some((value, _)) = filtered.get(selected) {
                         copy_to_clipboard(stdout, value)?;
                         return Ok(());
                     }
                 }
-                (KeyCode::Enter, _) => {
+                (code, modifiers) if matches_shortcut(code, modifiers, config.insert) => {
                     if let Some((value, _)) = filtered.get(selected) {
                         send_text(target, value)?;
                         return Ok(());

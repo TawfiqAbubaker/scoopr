@@ -62,6 +62,27 @@ herdr plugin action invoke scoopr.setup
 herdr server reload-config
 ```
 
+Scoopr's picker settings live separately from Herdr's global keybinding file. The setup action creates a starter plugin config when one does not exist. To customize it, find the directory with `herdr plugin config-dir scoopr`, then edit its `config.toml`:
+
+```toml
+[behavior]
+default_scope = "tab"       # tab, space, server
+default_filter = "all"      # all, word, line, path, url, hash, quote
+
+[keys]
+copy = "tab"
+insert = "enter"
+cycle_scope = "ctrl+s"
+open_filter = "ctrl+f"
+cancel = "esc"
+
+[popup]
+width = "80%"
+height = "80%"
+```
+
+Use `herdr plugin config-dir scoopr` to print the directory. Missing settings use these defaults. Shortcut values support named keys such as `tab`, `enter`, `esc`, `backspace`, `up`, `down`, `left`, and `right`, plus single characters with `ctrl+`, `alt+`, or `shift+` modifiers.
+
 Setup is idempotent. It creates a `config.toml.scoopr.bak` backup before editing, refuses to overwrite an existing `prefix+shift+c` binding, and marks the block so it can be removed later:
 
 ```sh
