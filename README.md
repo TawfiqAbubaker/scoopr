@@ -8,12 +8,14 @@
 
 Scoopr is a fuzzy-searchable scrollback picker for [Herdr](https://herdr.dev). Find a URL, path, command, log line, hash, quote, or anything else you remember seeing — then copy it or send it straight back to the pane that opened the picker.
 
+Heavily inspired by [extrakto](https://github.com/laktos/extrakto), Scoopr brings that fast, fuzzy terminal-text workflow from tmux to Herdr.
+
 <img alt="Rust" src="https://img.shields.io/badge/Rust-self--contained_crate-orange?logo=rust&logoColor=white">
 <img alt="Herdr" src="https://img.shields.io/badge/Herdr-%E2%89%A5%200.7-5865a3">
 <img alt="Platforms" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-2ea44f">
 <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 
-<br><br>
+<br>.
 
 <code>prefix + shift + c</code> &nbsp;→&nbsp; search &nbsp;→&nbsp; <code>Enter</code> to insert
 
