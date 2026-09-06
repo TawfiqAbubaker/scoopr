@@ -44,7 +44,7 @@ const SETUP_END: &str = "# <<< scoopr keybinding <<<";
 const DEFAULT_PLUGIN_CONFIG: &str = r#"# Scoopr settings. Remove a setting to use its default.
 
 [behavior]
-default_scope = "space"
+default_scope = "tab"
 default_filter = "all"
 
 [keys]
@@ -291,7 +291,7 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
     let target = target_pane().ok_or("could not determine the originating pane")?;
     let tab = target_tab().ok_or("could not determine the originating tab")?;
     let workspace = target_workspace().ok_or("could not determine the originating space")?;
-    let skip_tab = workspace_tab_count(&workspace)? == 1;
+    let skip_space = workspace_tab_count(&workspace)? == 1;
     let scope = picker_config.scope;
     let text = read_scope(scope, &tab, &workspace)?;
     let candidates = extract_candidates(&text);
@@ -306,7 +306,7 @@ fn run_picker() -> Result<(), Box<dyn std::error::Error>> {
         &tab,
         &workspace,
         scope,
-        skip_tab,
+        skip_space,
         candidates,
         picker_config,
     );
@@ -322,7 +322,7 @@ fn picker_loop(
     tab: &str,
     workspace: &str,
     mut scope: Scope,
-    skip_tab: bool,
+    skip_space: bool,
     mut candidates: Vec<Candidate>,
     config: PickerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -419,7 +419,7 @@ fn picker_loop(
                 (code, modifiers) if matches_shortcut(code, modifiers, config.cycle_scope) => {
                     drop(filtered);
                     cached_scopes[scope.index()] = Some(candidates);
-                    scope = scope.next(skip_tab);
+                    scope = scope.next(skip_space);
                     candidates = match cached_scopes[scope.index()].take() {
                         Some(cached) => cached,
                         None => extract_candidates(&read_scope(scope, tab, workspace)?),

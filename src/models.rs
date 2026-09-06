@@ -84,12 +84,12 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
-    pub(crate) fn next(self, skip_tab: bool) -> Self {
+    pub(crate) fn next(self, skip_space: bool) -> Self {
         match self {
-            Self::Space if skip_tab => Self::Server,
-            Self::Space => Self::Tab,
-            Self::Tab => Self::Server,
-            Self::Server => Self::Space,
+            Self::Tab if skip_space => Self::Server,
+            Self::Tab => Self::Space,
+            Self::Space => Self::Server,
+            Self::Server => Self::Tab,
         }
     }
     pub(crate) fn label(self) -> &'static str {

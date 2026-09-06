@@ -104,7 +104,7 @@ Edit its `config.toml`:
 
 ```toml
 [behavior]
-default_scope = "space"     # space, tab, server
+default_scope = "tab"       # tab, space, server
 default_filter = "all"      # all, word, line, path, url, hash, quote
 
 [keys]
@@ -130,20 +130,20 @@ herdr server reload-config
 
 ## Use the picker
 
-Open Scoopr from any Herdr pane. It starts at the current **space** and preserves the originating pane, so an inserted result goes back to the right place.
+Open Scoopr from any Herdr pane. It starts at the current **tab** and preserves the originating pane, so an inserted result goes back to the right place.
 
 | Key | Action |
 | --- | --- |
 | `Tab` | Copy the selected result through OSC 52 |
 | `Enter` | Insert the selected result into the originating pane |
-| `Ctrl-S` | Cycle through `space → tab → server` |
+| `Ctrl-S` | Cycle through `tab → space → server` |
 | `Ctrl-F` | Choose a candidate filter |
 | `↑` / `↓` | Move through matches |
 | `←` / `→` | Pan across long candidates |
 | `Esc` / `Ctrl-C` | Cancel |
 | Type / `Backspace` | Search and edit the query |
 
-When the current space contains only one tab, the tab scope is redundant and the cycle becomes `space → server`.
+When the current space contains only one tab, the space scope is redundant and the cycle becomes `tab → server`.
 
 Available filters are `all`, `word`, `line`, `path`, `url`, `hash`, and `quote`. Search treats straight and typographic quotation marks as equivalent while preserving the original text when copying or inserting.
 

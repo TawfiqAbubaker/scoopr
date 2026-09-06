@@ -175,11 +175,11 @@ fn treats_straight_and_typographic_apostrophes_as_equivalent() {
 
 #[test]
 fn cycles_through_all_scopes() {
-    assert_eq!(Scope::Space.next(false), Scope::Tab);
-    assert_eq!(Scope::Tab.next(false), Scope::Server);
-    assert_eq!(Scope::Server.next(false), Scope::Space);
-    assert_eq!(Scope::Space.next(true), Scope::Server);
-    assert_eq!(Scope::Server.next(true), Scope::Space);
+    assert_eq!(Scope::Tab.next(false), Scope::Space);
+    assert_eq!(Scope::Space.next(false), Scope::Server);
+    assert_eq!(Scope::Server.next(false), Scope::Tab);
+    assert_eq!(Scope::Tab.next(true), Scope::Server);
+    assert_eq!(Scope::Server.next(true), Scope::Tab);
     assert_eq!(Scope::Tab.index(), 0);
     assert_eq!(Scope::Space.index(), 1);
     assert_eq!(Scope::Server.index(), 2);

@@ -48,7 +48,7 @@ impl Default for Config {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            default_scope: "space".into(),
+            default_scope: "tab".into(),
             default_filter: "all".into(),
         }
     }
