@@ -1,9 +1,10 @@
+<img width="1916" height="821" alt="ChatGPT Image Sep 5, 2026, 08_08_41 PM" src="https://github.com/user-attachments/assets/ab1bf1d8-69c4-4992-a8cf-da63d9defb3d" />
 
 <div align="center">
 
 # Scoopr
 
-### A faster way to find anything in your terminal history.
+### Fastest Herdr plugin to find & copy anything in your terminal history.
 
 Scoopr is a fuzzy-searchable scrollback picker for [Herdr](https://herdr.dev). Find a URL, path, command, log line, hash, quote, or anything else you remember seeing — then copy it or send it straight back to the pane that opened the picker.
 
@@ -17,8 +18,6 @@ Scoopr is a fuzzy-searchable scrollback picker for [Herdr](https://herdr.dev). F
 <code>prefix + shift + c</code> &nbsp;→&nbsp; search &nbsp;→&nbsp; <code>Enter</code> to insert
 
 </div>
-
-Supports Windows, macOS, and Linux.
 
 ## Why Scoopr?
 
