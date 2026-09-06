@@ -15,7 +15,7 @@ Heavily inspired by [extrakto](https://github.com/laktos/extrakto), Scoopr bring
 <img alt="Platforms" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-2ea44f">
 <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 
-<br>.
+<br><br>
 
 <code>prefix + shift + c</code> &nbsp;→&nbsp; search &nbsp;→&nbsp; <code>Enter</code> to insert
 
