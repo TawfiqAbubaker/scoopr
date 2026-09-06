@@ -1,4 +1,3 @@
-
 use super::{
     encode_base64, extract_candidates, pane_ids_in_scope, ranked_matches, tab_ids_in_workspace,
     Candidate, Filter, Scope, KIND_LINE, KIND_WORD,
