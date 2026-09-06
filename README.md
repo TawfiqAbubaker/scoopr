@@ -1,18 +1,38 @@
+
+<div align="center">
+
 # Scoopr
 
-Scoopr is a small Rust plugin for [Herdr](https://herdr.dev) that turns terminal scrollback into a fast, fuzzy-selectable list. Select a URL, path, command, log line, hash, quote, or other useful text, then copy it or insert it back into the pane that opened Scoopr.
+### A faster way to find anything in your terminal history.
 
-## Requirements
+Scoopr is a fuzzy-searchable scrollback picker for [Herdr](https://herdr.dev). Find a URL, path, command, log line, hash, quote, or anything else you remember seeing — then copy it or send it straight back to the pane that opened the picker.
 
-- Herdr 0.7.0 or newer
-- Rust and Cargo (Herdr uses Cargo to build the plugin during installation)
-- A terminal that supports OSC 52 clipboard requests for the `Tab` copy action
+<img alt="Rust" src="https://img.shields.io/badge/Rust-self--contained_crate-orange?logo=rust&logoColor=white">
+<img alt="Herdr" src="https://img.shields.io/badge/Herdr-%E2%89%A5%200.7-5865a3">
+<img alt="Platforms" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-2ea44f">
+<img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 
-Scoopr supports macOS and Linux. It does not require tmux.
+<br><br>
+
+<code>prefix + shift + c</code> &nbsp;→&nbsp; search &nbsp;→&nbsp; <code>Enter</code> to insert
+
+</div>
+
+Supports Windows, macOS, and Linux.
+
+## Why Scoopr?
+
+Terminal scrollback is full of useful things that are awkward to recover: a command from ten minutes ago, a long URL, a temporary path, a commit hash, or a line from a build log. Scoopr turns that scrollback into a small, focused command palette.
+
+- **Fuzzy search** across terminal content, with ranking tuned for useful matches.
+- **Structured filters** for words, lines, paths, URLs, hashes, and quotes.
+- **Three scopes** — current space, current tab, or the whole server.
+- **Direct insertion** back into the originating pane, or clipboard copy via OSC 52.
+- **Popup-native** and ephemeral, with no database and no background service.
 
 ## Install
 
-Install the published GitHub plugin:
+### Published plugin
 
 ```sh
 herdr plugin install TawfiqAbubaker/scoopr -y
@@ -20,37 +40,36 @@ herdr plugin action invoke scoopr.setup
 herdr server reload-config
 ```
 
-The setup action adds the recommended `prefix+shift+c` launch shortcut and creates Scoopr's starter settings file. 
+`setup` adds the recommended `prefix+shift+c` shortcut and creates Scoopr’s starter settings file.
 
-To update to the latest published version:
+To update:
 
 ```sh
 herdr plugin uninstall scoopr
 herdr plugin install TawfiqAbubaker/scoopr -y
 ```
 
-## Install from a checkout
-
-From a checkout of the repository, build the release binary and link it into Herdr:
+### From a checkout
 
 ```sh
-cargo build --release
-herdr plugin link .
-herdr plugin action list --plugin scoopr
-```
-
-The repository's Herdr manifest builds the release binary and runs that binary at runtime, so Cargo is not needed in Herdr's runtime `PATH`.
-
-To update a linked checkout after pulling changes:
-
-```sh
+git clone https://github.com/TawfiqAbubaker/scoopr.git
+cd scoopr
 cargo build --release
 herdr plugin link .
 ```
 
-## Configure a keybinding
+The Herdr manifest builds and runs the release binary for you. Cargo is only needed when building or updating the linked plugin.
 
-Plugin manifests do not define global keybindings. Add a binding to `~/.config/herdr/config.toml`:
+## Configure
+
+Scoopr uses two configuration layers:
+
+1. Herdr’s global config defines the keybinding.
+2. Scoopr’s plugin config controls the picker.
+
+### Keybinding
+
+Plugin manifests do not define global keybindings. Add this to `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
@@ -60,26 +79,27 @@ command = "scoopr.open"
 description = "Scoop text from current tab"
 ```
 
-Reload Herdr after changing the configuration:
+Then reload Herdr:
 
 ```sh
 herdr server reload-config
 ```
 
-You can also invoke the action directly:
+You can also launch Scoopr directly:
 
 ```sh
 herdr plugin action invoke scoopr.open
 ```
 
-To have Scoopr add its recommended binding automatically, run its setup action:
+### Picker settings
+
+Find Scoopr’s config directory with:
 
 ```sh
-herdr plugin action invoke scoopr.setup
-herdr server reload-config
+herdr plugin config-dir scoopr
 ```
 
-Scoopr's picker settings live separately from Herdr's global keybinding file. The setup action creates a starter plugin config when one does not exist. To customize it, find the directory with `herdr plugin config-dir scoopr`, then edit its `config.toml`:
+Edit its `config.toml`:
 
 ```toml
 [behavior]
@@ -98,9 +118,9 @@ width = "80%"
 height = "80%"
 ```
 
-Use `herdr plugin config-dir scoopr` to print the directory. Missing settings use these defaults. Shortcut values support named keys such as `tab`, `enter`, `esc`, `backspace`, `up`, `down`, `left`, and `right`, plus single characters with `ctrl+`, `alt+`, or `shift+` modifiers.
+Missing settings use these defaults. Shortcut values support named keys such as `tab`, `enter`, `esc`, `backspace`, `up`, `down`, `left`, and `right`, plus single characters with `ctrl+`, `alt+`, or `shift+` modifiers.
 
-Setup is idempotent. It creates a `config.toml.scoopr.bak` backup before editing, refuses to overwrite an existing `prefix+shift+c` binding, and marks the block so it can be removed later:
+The setup action is idempotent. It backs up the Herdr config before editing, refuses to overwrite an existing `prefix+shift+c` binding, and marks its managed block so it can be removed later:
 
 ```sh
 herdr plugin action invoke scoopr.remove-setup
@@ -109,24 +129,26 @@ herdr server reload-config
 
 ## Use the picker
 
-Scoopr opens with the scrollback from every pane in the current tab. It keeps the originating pane, so the result is returned to the right place even though the picker runs in a popup.
+Open Scoopr from any Herdr pane. It starts at the current **space** and preserves the originating pane, so an inserted result goes back to the right place.
 
-- `Tab` — copy the selected result through OSC 52
-- `Enter` — insert the selected result into the originating pane
-- `Ctrl-S` — cycle through tab, workspace, and server scopes
-- `Ctrl-F` — choose a candidate filter
-- `Up` / `Down` — move through matches
-- `Left` / `Right` — pan across long candidates
-- `Esc` or `Ctrl-C` — cancel
-- Type to search; `Backspace` deletes a character
+| Key | Action |
+| --- | --- |
+| `Tab` | Copy the selected result through OSC 52 |
+| `Enter` | Insert the selected result into the originating pane |
+| `Ctrl-S` | Cycle through `space → tab → server` |
+| `Ctrl-F` | Choose a candidate filter |
+| `↑` / `↓` | Move through matches |
+| `←` / `→` | Pan across long candidates |
+| `Esc` / `Ctrl-C` | Cancel |
+| Type / `Backspace` | Search and edit the query |
 
-Filters are `all`, `word`, `line`, `path`, `url`, `hash`, and `quote`. Search treats straight and typographic quotation marks as equivalent while preserving the original text in copied and inserted results.
+When the current space contains only one tab, the tab scope is redundant and the cycle becomes `space → server`.
 
-When terminal lines have comparable match quality, the newer line lower in the scrollback wins the default selection. Stronger matches still take precedence over newer fuzzy-only matches.
+Available filters are `all`, `word`, `line`, `path`, `url`, `hash`, and `quote`. Search treats straight and typographic quotation marks as equivalent while preserving the original text when copying or inserting.
 
 ## Development
 
-Run the formatter, tests, and checks locally:
+Run the local checks:
 
 ```sh
 cargo fmt -- --check
@@ -134,7 +156,7 @@ cargo test
 cargo check
 ```
 
-The `extract` subcommand is useful for inspecting candidate extraction without opening a Herdr popup:
+Inspect candidate extraction without opening a popup:
 
 ```sh
 printf 'visit https://example.com\n' | cargo run -- extract
@@ -142,12 +164,14 @@ printf 'visit https://example.com\n' | cargo run -- extract
 
 ## Permissions and data handling
 
-Scoopr reads pane output through the Herdr CLI when the picker is opened. It may read panes in the selected tab, workspace, or server scope. Selected text is either sent back to the originating pane or emitted as an OSC 52 clipboard request. Scoopr does not make network requests or persist pane content.
+Scoopr reads pane output through the Herdr CLI when the picker opens. Depending on the selected scope, it may read panes in the current tab, space, or server. Selected text is either sent back to the originating pane or emitted as an OSC 52 clipboard request.
+
+Scoopr does not make network requests, persist pane content, or run a background process.
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes. Please do not include terminal logs containing credentials, tokens, customer data, or other private information.
 
 ## License
 
 Scoopr is released under the MIT License. See [LICENSE](LICENSE).
-
-## Contributing
-
-Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Please do not include terminal logs containing credentials, tokens, customer data, or other private information.
