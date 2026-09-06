@@ -23,13 +23,19 @@ Heavily inspired by [extrakto](https://github.com/laktos/extrakto), Scoopr bring
 
 ## Why Scoopr?
 
-Terminal scrollback is full of useful things that are awkward to recover: a command from ten minutes ago, a long URL, a temporary path, a commit hash, or a line from a build log. Scoopr turns that scrollback into a small, focused command palette.
+Terminal scrollback is full of useful things that are awkward to recover: a command, URL, path, a commit hash, or a line from a build log. Scoopr turns that scrollback into a small, focused command palette.
 
 - **Fuzzy search** across terminal content, with ranking tuned for useful matches.
 - **Structured filters** for words, lines, paths, URLs, hashes, and quotes.
 - **Three scopes** — current space, current tab, or the whole server.
 - **Direct insertion** back into the originating pane, or clipboard copy via OSC 52.
 - **Popup-native** and ephemeral, with no database and no background service.
+
+## Plugin Preview :
+<img width="1680" height="1025" alt="SCR-20260905-rtgp-4" src="https://github.com/user-attachments/assets/0e2996d0-87f3-4004-9239-d4b1e3017a2f" />
+
+
+
 
 ## Install
 
